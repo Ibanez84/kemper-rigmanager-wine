@@ -1,0 +1,30 @@
+From 71aa631f14df7e563449ad8e3ba3729fbfa1999e Mon Sep 17 00:00:00 2001
+From: Ibanez84 <359704787+Ibanez84@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 01:08:14 +0000
+Subject: [PATCH 5/5] win32u: Sign-extend the wParam of WM_PARENTNOTIFY for
+ WM_CREATE and WM_DESTROY.
+
+Windows passes the MAKEWPARAM(event, id) value sign-extended to 64 bits. .NET WinForms code
+that does a checked (int)m.WParam, such as Kemper Rig Manager's editor, throws an
+OverflowException when the child id has the high bit set.
+---
+ dlls/win32u/window.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 4bceb90..e56ac5b 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -4310,9 +4310,11 @@ static void send_parent_notify( HWND hwnd, UINT msg )
+         !(get_window_long( hwnd, GWL_EXSTYLE ) & WS_EX_NOPARENTNOTIFY))
+     {
+         HWND parent = get_parent( hwnd );
++        /* Windows sign-extends the 32-bit MAKEWPARAM value; .NET programs that do a
++         * checked (int)m.WParam throw an OverflowException otherwise. */
+         if (parent && parent != get_desktop_window())
+             send_message( parent, WM_PARENTNOTIFY,
+-                          MAKEWPARAM( msg, get_window_long( hwnd, GWLP_ID )), (LPARAM)hwnd );
++                          (INT_PTR)(INT)MAKEWPARAM( msg, get_window_long( hwnd, GWLP_ID )), (LPARAM)hwnd );
+     }
+ }
+ 

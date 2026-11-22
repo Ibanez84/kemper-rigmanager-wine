@@ -1,0 +1,138 @@
+From 9a982f0f6c8349e03ffbb15486e132cc4eafb2e0 Mon Sep 17 00:00:00 2001
+From: Ibanez84 <359704787+Ibanez84@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 01:07:47 +0000
+Subject: [PATCH 2/5] setupapi: Implement CM_Get_Parent and
+ CM_Get_DevNode_Registry_PropertyW, add SetupGetThreadLogToken.
+
+CM_Get_Parent reports ROOT\WINE\WINEUSB as the parent of USB devices, and SPDRP_ADDRESS is
+returned for device nodes. Kemper Rig Manager uses these to walk from its WinUSB device
+interface to the USB hub and port the device is attached to.
+---
+ dlls/setupapi/devinst.c     |  1 +
+ dlls/setupapi/misc.c        |  9 ++++++
+ dlls/setupapi/setupapi.spec |  1 +
+ dlls/setupapi/stubs.c       | 63 ++++++++++++++++++++++++++++++++++---
+ 4 files changed, 69 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/setupapi/devinst.c b/dlls/setupapi/devinst.c
+index ef3e6a5..17ff4dd 100644
+--- a/dlls/setupapi/devinst.c
++++ b/dlls/setupapi/devinst.c
+@@ -651,6 +651,7 @@ static const struct PropertyMapEntry PropertyMap[] = {
+     PROPERTY_MAP_ENTRY(REG_DWORD, "UINumber", DEVPROP_TYPE_INT32),
+     PROPERTY_MAP_ENTRY(REG_MULTI_SZ, "UpperFilters", DEVPROP_TYPE_STRING_LIST),
+     PROPERTY_MAP_ENTRY(REG_MULTI_SZ, "LowerFilters", DEVPROP_TYPE_STRING_LIST),
++    [SPDRP_ADDRESS] = PROPERTY_MAP_ENTRY(REG_DWORD, "Address", DEVPROP_TYPE_UINT32),
+     [SPDRP_BASE_CONTAINERID] = PROPERTY_MAP_ENTRY(REG_SZ, "ContainerId", DEVPROP_TYPE_GUID),
+ };
+ #undef PROPERTY_MAP_ENTRY
+diff --git a/dlls/setupapi/misc.c b/dlls/setupapi/misc.c
+index bef8bfd..d3287e1 100644
+--- a/dlls/setupapi/misc.c
++++ b/dlls/setupapi/misc.c
+@@ -1475,3 +1475,12 @@ WORD WINAPI CM_Get_Version(void)
+     TRACE("()\n");
+     return 0x0400;
+ }
++
++/***********************************************************************
++ *      SetupGetThreadLogToken (SETUPAPI.@)
++ */
++DWORDLONG WINAPI SetupGetThreadLogToken(void)
++{
++    FIXME("stub\n");
++    return 1; /* LOGTOKEN_NO_LOG */
++}
+diff --git a/dlls/setupapi/setupapi.spec b/dlls/setupapi/setupapi.spec
+index 9ac1c6c..799fa81 100644
+--- a/dlls/setupapi/setupapi.spec
++++ b/dlls/setupapi/setupapi.spec
+@@ -466,6 +466,7 @@
+ @ stdcall SetupGetStringFieldW(ptr long ptr long ptr)
+ @ stdcall SetupGetTargetPathA(ptr ptr str ptr long ptr)
+ @ stdcall SetupGetTargetPathW(ptr ptr wstr ptr long ptr)
++@ stdcall -ret64 SetupGetThreadLogToken()
+ @ stdcall SetupInitDefaultQueueCallback(long)
+ @ stdcall SetupInitDefaultQueueCallbackEx(long long long long ptr)
+ @ stdcall SetupInitializeFileLogA (str long)
+diff --git a/dlls/setupapi/stubs.c b/dlls/setupapi/stubs.c
+index 44c81a1..c5d25f5 100644
+--- a/dlls/setupapi/stubs.c
++++ b/dlls/setupapi/stubs.c
+@@ -135,9 +135,33 @@ DWORD WINAPI CM_Get_Device_ID_ExW(
+  */
+ DWORD WINAPI CM_Get_Parent(PDEVINST pdnDevInst, DEVINST dnDevInst, ULONG ulFlags)
+ {
+-    FIXME("%p 0x%08lx 0x%08lx stub\n", pdnDevInst, dnDevInst, ulFlags);
+-    if(pdnDevInst)
+-        *pdnDevInst = 0;
++    WCHAR id[MAX_DEVICE_ID_LEN];
++
++    TRACE("%p 0x%08lx 0x%08lx\n", pdnDevInst, dnDevInst, ulFlags);
++
++    if (!pdnDevInst)
++        return CR_INVALID_POINTER;
++    *pdnDevInst = 0;
++
++    /* USB devices are children of the wineusb root, which acts as their hub. */
++    if (!CM_Get_Device_IDW(dnDevInst, id, ARRAY_SIZE(id), 0) && !wcsnicmp(id, L"USB\\", 4))
++    {
++        SP_DEVINFO_DATA data = {sizeof(data)};
++        HDEVINFO set = SetupDiCreateDeviceInfoList(NULL, NULL);
++        CONFIGRET ret = CR_NO_SUCH_DEVNODE;
++
++        if (set == INVALID_HANDLE_VALUE)
++            return CR_FAILURE;
++        if (SetupDiOpenDeviceInfoW(set, L"ROOT\\WINE\\WINEUSB", NULL, 0, &data))
++        {
++            *pdnDevInst = data.DevInst;
++            ret = CR_SUCCESS;
++        }
++        SetupDiDestroyDeviceInfoList(set);
++        return ret;
++    }
++
++    FIXME("no parent known for %s\n", debugstr_w(id));
+     return CR_NO_SUCH_DEVNODE;
+ }
+ 
+@@ -303,8 +327,37 @@ CONFIGRET WINAPI CM_Get_DevNode_Registry_Property_ExA(DEVINST dev, ULONG prop, P
+ CONFIGRET WINAPI CM_Get_DevNode_Registry_Property_ExW(DEVINST dev, ULONG prop, PULONG regdatatype,
+     PVOID buf, PULONG len, ULONG flags, HMACHINE machine)
+ {
+-    FIXME("0x%08lx %lu %p %p %p 0x%08lx %p: stub\n", dev, prop, regdatatype, buf, len, flags, machine);
+-    return CR_FAILURE;
++    SP_DEVINFO_DATA data = {sizeof(data)};
++    WCHAR id[MAX_DEVICE_ID_LEN];
++    CONFIGRET ret = CR_NO_SUCH_DEVNODE;
++    DWORD size = 0;
++    HDEVINFO set;
++
++    TRACE("0x%08lx %lu %p %p %p 0x%08lx %p\n", dev, prop, regdatatype, buf, len, flags, machine);
++
++    if (!len)
++        return CR_INVALID_POINTER;
++    if (!prop)
++        return CR_INVALID_PROPERTY;
++    if (CM_Get_Device_IDW(dev, id, ARRAY_SIZE(id), 0))
++        return CR_NO_SUCH_DEVNODE;
++    if ((set = SetupDiCreateDeviceInfoList(NULL, NULL)) == INVALID_HANDLE_VALUE)
++        return CR_FAILURE;
++
++    if (SetupDiOpenDeviceInfoW(set, id, NULL, 0, &data))
++    {
++        /* CM_DRP_* values are SPDRP_* values plus one. */
++        if (SetupDiGetDeviceRegistryPropertyW(set, &data, prop - 1, regdatatype, buf, buf ? *len : 0, &size))
++            ret = CR_SUCCESS;
++        else if (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
++            ret = CR_BUFFER_SMALL;
++        else
++            ret = CR_NO_SUCH_VALUE;
++        *len = size;
++    }
++
++    SetupDiDestroyDeviceInfoList(set);
++    return ret;
+ }
+ 
+ /***********************************************************************
